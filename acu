@@ -1,0 +1,1510 @@
+#!/bin/bash
+#############################################################
+#                                                           #
+#  DELL|EMC Avamar Software 7.1.x Add Storage Node Script   #
+#                                                           #
+# Description   : Avamar Capacity Upgrade Tool              #
+# Author        : Ahmed Fekry, ahmed.fekry@dell.com         #
+# License       : GPL <http://www.gnu.org/licenses/gpl.html #
+#                                                           #
+#############################################################
+
+
+if [[ $# != 1 ]] ; then
+        echo "Usage: $0 <cfg file>"
+        exit 2
+else
+        cfg_file=$1
+fi
+
+if [[ ! -e $cfg_file || ! -f $cfg_file ]] ; then
+        echo "No such file $1"
+        exit 3
+else
+        . ./$cfg_file 2>&1
+fi
+
+if [[ $? != 0 ]] ; then
+        echo "Unable to load configuration file $cfg_file ".
+        exit 100
+fi
+
+if [[ "$user" != "admin" ]] ; then
+        echo "Please run as admin"
+        exit 1
+fi
+
+if [[ ! -d $lock ]] ; then
+        mkdir $lock
+fi
+
+if [[ ! -d $secdir ]] ; then
+        mkdir $secdir
+fi
+
+lock() {
+	touch $lock/.$1.lock
+}
+
+unlock() {
+	if [[ -e $lock/.$1.lock ]] ; then
+		rm $lock/.$1.lock
+	fi
+}
+
+loading() {
+
+	var=$1
+	while [ "$var" -lt 10 ] ; do
+		for i in '-' '\' '|' '/' ; do 
+			echo -ne "\r$i" ; sleep 0.1
+			var=`expr $var + 1`
+		done
+	done
+	echo -ne "\r"
+}
+
+log() {
+    echo -ne "$timestamp : $1\n" | tee -a $logfile
+}
+
+check() {
+read -r -e -p $'\nproceed ?[y/n] ' answer
+case $answer in
+        [yY][eE][sS]|[yY])
+	proceed="TRUE"
+        ;;
+        [nN][oO]|[nN])
+	proceed="FALSE"
+        exit 6
+        ;;
+	*)
+	exit 6
+	;;
+esac
+}
+
+conncheck() {
+	echo -ne "\n$(tput setaf 6)Connectivity check:$(tput sgr0)\n\n"
+        if [[ proceed -eq "TRUE" ]] ; then
+		echo -ne "\n$(tput setaf 6)ICMP checks:$(tput sgr0)\n"
+		port=22
+                ping -c$ping_cnt $ipmi_ip &>/dev/null
+                if [[ $? -eq 0 ]] ; then
+                        echo -ne "IPMI IP         :   $(tput setaf 2)PING [OK]$(tput sgr0)\n"
+                else
+                        echo "IPMI IP           :   Ping timeout!"
+                        echo "Please check IPMI connection" && exit 11
+                fi
+
+		ping -c$ping_cnt $utility_node_ip &>/dev/null
+		if [[ $? -eq 0 ]] ; then
+			echo "Utility Node	:   $(tput setaf 2)PING [OK]$(tput sgr0)"
+		else
+			echo "Utility Node	:    Ping timeout!"
+			echo "Please check utility node connection" && exit 11
+		fi
+
+		ping -c$ping_cnt $storage_node_ip &>/dev/null
+                if [[ $? -eq 0 ]] ; then
+                        echo "Storage Node	:   $(tput setaf 2)PING [OK]$(tput sgr0)"
+                else
+                        echo "Storage Node	:    Ping timeout!"
+                        echo "Please check Storage node connection" && exit 11
+                fi
+
+		ping -c$ping_cnt $ntp_ip &>/dev/null
+                if [[ $? -eq 0 ]] ; then
+                        echo "NTP Server	:   $(tput setaf 2)PING [OK]$(tput sgr0)"
+                else
+                        echo "NTP Server	:    Ping timeout!"
+                        echo "Please check NTP Server connection" && exit 11
+                fi
+
+		echo -ne "\n$(tput setaf 6)SSH Checks:$(tput sgr0)\n"
+		2>/dev/null 1>/dev/null echo "" > /dev/tcp/$utility_node_ip/$port 
+                if [[ $? == 0 ]] ; then
+                	echo -ne "Utility Node    :   $(tput setaf 2)SSH [OK]$(tput sgr0)\n"
+                else
+                        echo -ne "Utility Node    :     $(tput setaf 1)SSH [UNREACHABLE]$(tput sgr0)\n"
+                        echo "Please check SSH PORT 22 on utility node $utility_node_ip" && exit 11
+                fi
+                2>/dev/null 1>/dev/null echo "" > /dev/tcp/$storage_node_ip/$port 
+                if [[ $? == 0 ]] ; then
+                        echo -ne "Storage Node    :   $(tput setaf 2)SSH [OK]$(tput sgr0)\n"
+                else
+                        echo -ne "Storage Node    :     $(tput setaf 1)SSH [UNREACHABLE]$(tput sgr0)\n"
+                        echo "Please check SSH PORT 22 on utility node $utility_node_ip" && exit 11
+                fi
+	fi
+	echo -ne "\n$(tput setaf 2)All good!\n\n$(tput sgr0)"
+	check
+	if [[ $proceed -eq "TRUE" ]]  ; then
+	echo -e "\n$(tput setaf 2)Proceeding...\n$(tput sgr0)"
+	loading 1
+	else
+		exit 6
+	fi
+}
+
+
+# TASK 1
+# Load SSH Keys
+
+task1() {
+		lock 1
+		echo "########################"
+		echo "$(tput setab 7)$(tput setaf 0)TASK #1 - LOAD SSH KEYS $(tput sgr0)"
+		echo "########################"
+		log "(Starting Task 1)"
+		log "Starting SSH Agent..."
+		eval `$bin/ssh-agent` &> $logfile
+		if [[ $? == 0 ]] ; then
+			log "SSH Agent started successfully"
+		elif [[ $? != 0 ]] ; then
+			log "SSH Agent failed to start"
+		fi
+		log "Adding admin key identity "
+		$bin/ssh-add ~admin/.ssh/dpnid | tee -a $logfile
+		
+		if [[ $? != 0 ]] ; then
+			log "Unable to add admin key identity .. exiting !"
+			exit 25
+		fi
+
+		log "Listing identity:"
+		echo ""
+		$bin/ssh-add -l
+		if [[ $? != 0 ]] ; then
+			log "error listing identity"
+			exit 25
+		fi
+		log "Task 1 completed successfully"
+		echo -ne "$(tput setaf 2)\nSuccess\n$(tput sgr0)"
+		success="TRUE"
+		unlock 1
+		check
+		if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+			task2
+		fi
+}
+
+# TASK 2
+# proactive_check dir 
+
+task2() {
+		lock 2
+		echo "#####################################"
+		echo "$(tput setab 7)$(tput setaf 0)TASK #2 - proactive_check directory  $(tput sgr0)"
+		echo "#####################################"
+		log "(Starting Task 2)"
+		cd $home
+		if [[ -d proactive_check ]] ; then
+    			log "proactive_check directory exists"
+			if [[ -e proactive_check/proactive_check.pl ]] ; then
+				log "proactive_check.pl exists"
+				if [[ -x "proactive_check/proactive_check.pl" ]] ; then
+					log "Executable bit already set"
+				else
+					log "Setting executable bit"
+					chmod u+x $home/acu/proactive_check/proactive_check.pl
+				fi
+			fi
+		else
+    			log "proactive_check does not exist, please redownload the package"
+			exit 200
+		fi
+		echo -ne "$(tput setaf 2)\nSuccess\n$(tput sgr0)"
+		success="TRUE"
+		unlock 2
+		check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task3
+                fi
+
+}
+
+# TASK 3
+# Run proactive_check 
+
+task3() {
+		lock 3
+        	echo "##############################"
+        	echo "$(tput setab 7)$(tput setaf 0)TASK #3 - run proactive_check $(tput sgr0)"
+        	echo "##############################"
+		log "(Starting Task 3)"
+		log "Running proactive_check script"
+		$home/proactive_check/proactive_check.pl --addnode 
+                success="TRUE"
+		unlock 3 
+		check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task4
+                fi
+
+}
+
+# TASK 4
+# Enable Service Mode
+
+task4() {
+		lock 4
+        	echo "##############################"
+        	echo "$(tput setab 7)$(tput setaf 0)TASK #4 - Enable Service Mode $(tput sgr0)"
+        	echo "##############################"
+		log "(Starting Task 4)"
+		log "Enabling Service Mode"
+		$home/proactive_check/proactive_check.pl --servicemode=3
+		echo "$(tput setaf 3)Please verify that service mode is enabled for 3 hours $(tput sgr0)"
+		log "Checking if Service Mode is enabled"
+        	$home/proactive_check/proactive_check.pl
+		
+		success="TRUE"
+		unlock 4
+                check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task5
+                fi
+
+}
+
+# TASK  5
+# Collect System Info 
+
+task5() {
+		lock 5
+		if [ ! -e $_sysinfodir ] ; then
+			mkdir $_sysinfodir
+		fi
+                echo "##############################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #5 - Collect System Info $(tput sgr0)"
+                echo "##############################"
+		log "(Starting Task 5)"
+		log "Collecting system information from Utility node"
+		log "Running status.dpn"
+		echo -ne "\n$(tput setaf 3)NOTE: Please Validate the GSAN version reported on all the data nodes is running a consistent version."
+		echo -ne "\nAlso validate that the 'Percent Full' is within 2% on all nodes and that the RunLevel is at fullaccess\n\n\n$(tput sgr0)"
+		log "Status.dpn:"
+		status.dpn | tee $_sysinfodir/status.dpn.out
+		loading 1
+		log "nodenumbers:"
+		nodenumbers | tee $_sysinfodir/nodenumbers.out
+		loading 1
+		log "nodedb:"
+		nodedb print --nodes=0.all+ --addr --id | tee $_sysinfodir/nodedb.out
+		loading 1
+		log "Loading dpn keys"
+		log "***** Starting SSH Agent"
+                eval `$bin/ssh-agent` 
+                if [[ $? == 0 ]] ; then
+                        log "SSH Agent started successfully"
+                elif [[ $? != 0 ]] ; then
+                        log "SSH Agent failed to start"
+                fi
+
+                log "Adding dpn keys identity "
+                $bin/ssh-add ~admin/.ssh/dpnid
+                if [[ $? == 0 ]] ; then
+                        log "dpn keys added successfully"
+                elif [[ $? != 0 ]] ; then
+                        log "***** Error: failed to add dpn keys"
+                fi
+                log "***** Listing identity"
+                $bin/ssh-add -l
+		log "Verifying node types of existing grid:"
+		loading 1
+		mapall --user=root --noerror $avhome/bin/syscheck --sysconfigdbfile=$avhome/var/sysconfigdb.xml | tee $_sysinfodir/mapall.out
+		log "Verifying if the system is a RAIN configuration:"
+		loading 1
+		mapall --user=root --noerror 'ls /data01/cur |grep par' |grep -v probe | wc -l | tee $_sysinfodir/mapall.out
+
+		# the following commands to be executed on the new storage node
+		# can be executed remotely from the utility node
+		# copy syscheck and sysconfigdb.xml to the new storage node
+
+		log "Copying syscheck to storage node : $storage_node_ip"
+		scp /usr/local/avamar/bin/syscheck root@$storage_node_ip:/usr/local/avamar/src/
+		if [[ $? != 0 ]] ; then
+			log "Failed to copy syscheck to $storage_node_ip"
+		else
+			log "syscheck copied successfully to $storage_node_ip"
+		fi
+		
+		log "Copying sysconfigdb.xml to storage node : $storage_node_ip"
+                scp /usr/local/avamar/var/sysconfigdb.xml root@$storage_node_ip:/usr/local/avamar/src/
+                if [[ $? != 0 ]] ; then
+                        log "Failed to copy sysconfigdb.xml to $storage_node_ip"
+                else
+                        log "sysconfigdb.xml copied successfully to $storage_node_ip"
+                fi
+		
+		# Verify the new storage node is the same node type as the existing grid
+		ssh -x root@$storage_node_ip '/usr/local/avamar/src/syscheck --sysconfigdbfile=/usr/local/avamar/src/sysconfigdb.xml'
+		ssh -x root@$storage_node_ip '/usr/local/avamar/src/syscheck --sysconfigdbfile=/usr/local/avamar/src/sysconfigdb.xml --verbose 2>&1 | grep "<hwcheck"'
+		ssh -x root@$storage_node_ip 'ls /data0?'
+		success="TRUE"
+		unlock 5
+		check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task8
+                fi
+}
+
+
+# TASK 6
+# Update checkpoint config
+
+task6() {
+        	lock 6
+                echo "##########################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #6 - Update Checkpoint Configuration $(tput sgr0)"
+                echo "##########################################"
+                log "(Starting Task 6)"
+		log "Collecting current cpmostrecent and cphfschecked values"
+		avmaint config --ava | grep cp
+		log "Changing most recent checkpoints value to 10"
+		avmaint config --ava cpmostrecent=10
+		log "Validating that cpmostrecent value changed"
+		avmaint config --ava | grep cp
+		log "Changing number of recent hfschecked retained"
+		avmaint config --ava cphfschecked=5
+		log "Validating that cphfschecked value changed"
+		avmaint config --ava | grep cp
+		log "Validating that balancing is disabled ( balancemin=0 )"
+		avmaint config --ava | grep balancemin
+		echo -ne " Would you like to set balancemin to 0 ? "
+		_answered=0
+		while [[ $_answered != 1 ]] ; do
+			read -r -e -p $'\npress n to continue and y to set balancemin to 0 [y/n]:  ' answer
+			case $answer in
+        			[yY][eE][sS]|[yY])
+				log "Setting balancemin to 0"
+				avmaint config --ava balancemin=0 
+				log "Validating that balancemin equals 0"
+				avmaint config --ava | grep balancemin
+				_answered=1
+        			;;
+        			[nN][oO]|[nN])
+				log "Continuing..."
+				_answered=1
+				continue
+        			;;
+				*)
+				_answered=0
+				;;
+			esac
+		done
+		log "Verifying that all stripes are online ( server is not migrating stripes )"	
+		log "Wait for 2 minutes to verify all stripes are online "
+		for i in {1..5}; do 
+			status.dpn
+			sleep 5
+		done
+		log "Disabling asynchronous crunching"
+		avmaint config --ava asynccrunching=false
+		log "Verifying that asynchronous crunching is disabled"
+		avmaint config --ava | grep crunch
+		success="TRUE"
+		unlock 6
+		check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task7
+                fi
+}
+
+
+# TASK 7
+# Perform a checkpoint with
+# full validation
+
+task7() {
+                lock 7
+                echo "####################################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #7 - Perform a checkpoint with Full Validation $(tput sgr0)"
+                echo "####################################################"
+                log "(Starting Task 7)"
+		log "Checking for a recent validated checkpoint"
+		mccli checkpoint show --verbose=TRUE | tee -a $logfile
+		echo -ne "$(tput setab 0)$(tput setaf 5)Note:$(tput sgr0)\nIf there is no validated checkpoint within the past 36 hours,then\ncontinue with this task to create a new validated checkpoint.\nHowever, if there is a validated checkpoint within the past 36 hours,\nthen skip this task and continue with the rest of the procedure.$(tput sgr0)"
+		ret=0
+		while [[ $ret -ne "1" ]] ; do
+                	read -r -e -p $'\n\nProceed with this task and create a new validated checkpoint ? [y/n] : ' answer
+			case $answer in
+        			[yY][eE][sS]|[yY])
+				ret=1
+        			;;
+        			[nN][oO]|[nN])
+				log "skipping task7 - checkpoint validation/creation"
+				task8
+        			;;
+        			*)
+        			ret=0
+        			;;
+			esac
+		done
+		log "Creating a validated checkpoint..."
+		log "Verifying that no maintenance tasks are running"
+		status.dpn
+		log "Checking status of avamar services"
+		dpnctl status | tee -a $tmp/status.dpn.out
+		log "checking if maintenance scheduler is running"
+		maint=`cat $tmp/status.dpn.out | grep -i "Maintenance" | grep -i "window" | grep -i status | cut -d: -f4 | sed 's/ //g' | tr -d '.'`
+		if [[ $maint == "suspended" ]] ; then
+    			echo "Maintenance windows scheduler is suspended"
+		elif [[ $maint == "up" ]] ; then
+    			echo "Maintenance windows scheduler is up"
+	                ret=0
+                	while [[ $ret -ne "1" ]] ; do
+                        read -r -e -p $'\nStop maintenance scheduler ? :' answer
+                        case $answer in
+                                [yY][eE][sS]|[yY])
+				log "Stopping maintenance scheduler..."
+				dpnctl stop maint
+                                ;;
+                                [nN][oO]|[nN])
+				log "Continuing..."
+				ret=1
+                                ;;
+                                *)
+                                ret=0
+                                ;;
+                        esac
+                done
+		fi
+		log "Creating checkpoint..."
+		sudo avmaint --ava checkpoint
+		log "Please verify that the checkpoint has been created"
+		log "Printing checkpoint lists (cplist):"
+		sudo cplist
+		log "If the most recent validated checkpoint is more than 24 hours old, validate the checkpoint you just created"
+		read -r -e -p $'Please enter checkpoint number (cp.number) to validate: ' cpnum
+		log "Validating checkpoint $cpnum..."
+		sudo avmaint hfscheck --checkpoint=$cpnum --ava --rolling
+		success="TRUE"
+                unlock 7
+                check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task8
+                fi
+
+
+}
+
+
+
+# TASK 8   ( task 12) 
+#Configure The New Nodes
+# as storage nodes
+
+task8() {
+                lock 8
+                echo "####################################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #8 - Configure the new nodes as Storage nodes $(tput sgr0)"
+                echo "####################################################"
+                log "(Starting Task 8)"
+		log "Connecting to Storage node : $storage_node_ip"
+		log "Saving original change_nodetype to /usr/local/avamar/install/scripts/change_nodetype-1.42"
+		ssh $storage_node_ip -x "mv /usr/local/avamar/install/scripts/change_nodetype /usr/local/avamar/install/scripts/change_nodetype-1.42"
+		if [[ $? != 0 ]] ; then
+			log "ERROR: unable to save original change_nodetype on storage node $storage_node_ip"
+	#		exit 15
+		fi		
+		log "Copying change_nodetype from utility node to new storage node"
+		scp /usr/local/avamar/install/scripts/change_nodetype $storage_node_ip:/usr/local/avamar/install/scripts/change_nodetype
+		if [[ $? != 0 ]] ; then
+			log "ERROR: unable to copy change_nodetype from utility node to new storage node"
+	#		exit 16
+		fi
+
+		log "Converting the new node to a storage node"
+		ssh $storage_node_ip -x "sudo /usr/local/avamar/install/scripts/change_nodetype --data"
+		if [[ $? != 0 ]] ; then
+			log "ERROR: unable to convert the new node to a storage node"
+	#		exit 17
+		fi
+
+		log "Validating that the node is now a storage node"
+		ssh $storage_node_ip -x "sudo cat /usr/local/avamar/etc/node.cfg"
+		if [[ $? != 0 ]] ; then
+			log "ERROR: unable to validate"
+	#		exit 18
+		fi
+                unlock 8
+                check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task9
+                fi
+
+
+}
+
+
+# TASK 9 ( task 13)
+# Configure RMM
+
+task9() {
+                lock 9
+                echo "#######################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #9 Configure RMM $(tput sgr0)"
+                echo "#######################"
+                log "(Starting Task 9)"
+		log "Configuring RMM"
+		ret=0
+		while [[ $ret -ne "1" ]] ; do
+			echo -ne "\n1] Dedicated"
+			echo -ne "\n2] Shared with eth0"
+			echo -ne "\n3] Do not configure RMM ( skip to next task )\n"
+			read -r -e -p $'\nPlease select an option [1/2/3]: ' answer
+			case $answer in
+        			1)
+        			mode="Dedicated"
+				echo "Proceeding with dedicated configuration..."
+				ssh root@$storage_node_ip -x "ipmitool lan set 3 ipaddr $rmm_ip"
+				ssh root@$storage_node_ip -x "ipmitool lan set 3 netmask $rmm_netmask"
+				ssh root@$storage_node_ip -x "ipmitool lan set 3 defgw ipaddr $rmm_gateway"
+				ret=1
+        			;;
+        			2)
+				mode="Shared"
+				echo "Proceeding with shared configuration..."
+				ssh root@$storage_node_ip -x "ipmitool lan set 1 ipaddr $rmm_ip"
+				ssh root@$storage_node_ip -x "ipmitool lan set 1 netmask $rmm_netmask"
+				ssh root@$storage_node_ip -x "ipmitool lan set 1 defgw ipaddr $rmm_gateway"
+				ssh root@$storage_node_ip -x "ipmitool lan set 3 ipaddr 0.0.0.0"
+				ssh root@$storage_node_ip -x "ipmitool lan set 3 netmask 0.0.0.0"
+				ssh root@$storage_node_ip -x "ipmitool lan set 3 defgw ipaddr 0.0.0.0"
+				ret=1
+        			;;
+				3)
+				ret=1
+				success="TRUE"
+				task10
+				;;
+       				*)
+				ret=0
+        			;;
+			esac
+		done
+		success="TRUE"
+                unlock 9
+                check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task10
+                fi
+
+
+}
+
+# TASK 10   ( task 14)
+# Update Network Configuration
+# on new nodes
+
+
+task10() {
+                lock 10
+                echo "#################################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #10 Update Network configuration on new node $(tput sgr0)"
+                echo "#################################################"
+                log "(Starting Task 10)"
+                log "***** Starting SSH Agent"
+                eval `$bin/ssh-agent` &> $logfile
+                if [[ $? == 0 ]] ; then
+                        log "SSH Agent started successfully"
+                elif [[ $? != 0 ]] ; then
+                        log "SSH Agent failed to start"
+                fi
+
+                log "Adding dpn keys identity "
+                $bin/ssh-add ~admin/.ssh/dpnid &> $logfile
+                if [[ $? == 0 ]] ; then
+                        log "dpn keys added successfully"
+                elif [[ $? != 0 ]] ; then
+                        log "***** Error: failed to add dpn keys"
+                fi
+                log "***** Listing identity"
+                $bin/ssh-add -l
+
+		if [[ -e $home/rebuild_collect.pl ]] ; then
+			log "rebuild_collect.pl exists"
+			if [[ -x $home/rebuild.collect.pl ]] ; then
+				log "executable bit already sit on rebuild_collect.pl"
+			else
+				chmod u+x $home/rebuild_collect.pl
+			fi
+		else
+			log "rebuild_collect.pl does not exist, please re-download the package"
+		fi
+	
+		log "Starting rebuild_collect.pl..."
+		loading 5
+		$rebuild_collect --source=0.0 | tee -a $log_file
+		log "Listing rebuild_collect tar file contents:"
+		_rebuild_collect_files=`ls rebuild_config_files*`
+		tar -tzf $_rebuild_collect_files
+		log "Copying rebuild_config_files to new storage node : $storage_node_ip"
+		scp -p $_rebuild_collect_files $storage_node_ip:/home/admin
+		if [[ $? != 0 ]] ; then
+			log "Unable to copy $home/rebuild_config_files to storage node : $storage_node_ip"
+		fi
+		echo -ne "\n$(tput setaf 1)$(tput setab 7)Connecting to storage node and updating network configuration$(tput sgr0)"
+		log "\nConnecting to New Storage Node as root, please provide password when prompted..."
+		ssh -t root@$storage_node_ip <<-EOF
+			cd /home/admin
+			tar zxvf rebuild_config_files*.tgz
+			cd rebuild_config_files*
+			ls
+			sed -i "/^IPADDR=/c\IPADDR=$bond0" ifcfg-bond0
+			sed -i "/^IPADDR=/c\IPADDR=$bond1" ifcfg-bond1
+			cp -p ifcfg* ifroute* routes /etc/sysconfig/network
+			cp -p hosts resolv.conf modprobe.conf.local /etc
+			EOF
+
+		success="TRUE"
+                unlock 10
+                check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task11
+                fi
+}
+
+# TASK 11   ( task 15)
+# Restart Network Service
+# on New node
+
+task11() {
+                lock 11
+                echo "##########################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #11 Restart Network Service on New Node $(tput sgr0)"
+                echo "##########################################"
+                log "(Starting Task 11)"
+		log "\nConnecting to New Storage Node as root, please provide password when prompted..."
+		ssh root@$storage_node_ip <<-EOF
+			cat <<end-of-lines >/tmp/restart_script.sh
+			#!/bin/sh
+			service network stop
+			modprobe -r bonding
+			service network start
+			end-of-lines
+		chmod +x /tmp/restart_script.sh
+		nohup /tmp/restart_script.sh &
+		EOF
+		echo -ne "\nCustomer has VLANs configured on their backup network?"
+		read -r -e -p $'\ni.e: Would you like to add 8021q module to the kernel ? [y/n]' answer
+		ret=0
+		while [[ $ret != "1"  ]] ; do
+			case $answer in
+        			[yY][eE][sS]|[yY])
+				vlans=1
+				ret=1
+        			;;
+        			[nN][oO]|[nN])
+				vlans=0
+				ret=1
+        			;;
+        			*)
+				ret=0
+        			;;
+			esac
+		done
+		if [[ $vlans == "1" ]] ; then
+			echo "modprobing 802.1q on the new Storage Node"
+			ssh root@$storage_node_ip -x "modprobe 8021q"
+			if [[ $? != 0 ]] ; then
+				log "Unable to add 802.1q module to the storage node"
+				exit 22
+			fi
+		fi
+
+                unlock 11
+                check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task12
+                fi
+}
+
+
+# TASK 12   ( task 16)
+# Install RAID tools
+
+task12() {
+                lock 12
+                echo "##########################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #12 Install RAID tools $(tput sgr0)"
+                echo "##########################################"
+                log "(Starting Task 12)"
+		log "Copying gen4s-sys-1.2.zip and dpnavsys-1.1.0-7.x86_64.rpm to new storage node"
+
+		scp gen4s-sys-1.2.zip root@$storage_node_ip:$avhome/src
+		if [[ $? != 0 ]] ; then
+			log "unable to copy gen4s-sys-1.2.zip to $storage_node_ip"
+			log "please copy it manually and confirm to continue"
+			check
+		fi
+		sleep 5
+		scp dpnavsys-1.1.0-7.x86_64.rpm root@$storage_node_ip:/usr/local/avamar/src
+                if [[ $? != 0 ]] ; then
+                        log "unable to copy dpnavsys-1.1.0-7.x86_64.rpm to $storage_node_ip"
+                        log "please copy it manually and confirm to continue"
+                        check
+                fi
+
+		sleep 5
+		log "Extracting gen4s-sys-1.2.zip on new storage node"
+		ssh root@$storage_node_ip -x "cd $avhome/src && unzip gen4s-sys-1.2.zip"
+		sleep 5
+		log "Installing RAID Tools"
+		ssh root@$storage_node_ip -x "$avhome/src/gen4s-sys-1.2/avsetup.sh"
+		sleep 5
+		log "Installing dpnavsys"
+		ssh root@$storage_node_ip -x "rpm -ivh $avhome/src/dpnavsys-1.1.0-7.x86_64.rpm"
+
+                unlock 12
+                check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task13
+                fi
+}
+
+
+#TASK 13 ( task 17)
+#Patching Stunnel  
+
+task13() {
+                lock 13
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #13 Patching Stunnel $(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 13)"
+		log "Copying stunnel from Utility node to new storage node"
+		log "Please Enter Utility node root password"
+		su -c "cd /data01/avamar/src/SLES11_64 && tar zxvf sec_os_updates_SLES*.tgz stunnel-4.36-0.10.2.x86_64.rpm" | tee -a $logfile
+		log "Please re-enter Utility node root password followed by storage node root password"
+		su -c "scp -p /data01/avamar/src/SLES11_64/stunnel-4.36-0.10.2.x86_64.rpm root@$storage_node_ip:/data01/avamar/src"
+		if [[ $? == 0 ]] ; then
+			log "Copied stunnel-4.36-0.10.2.x86_64.rpm successfully"
+		else
+			log "Unable to copy stunnel-4.36-0.10.2.x86_64.rpm"
+			log "Please copy stunnel-4.36-0.10.2.x86_64.rpm manually to new storage node and confirm to continue"
+			check
+		fi
+		sleep 5
+		log "checking stunnel md5sum on storage node"
+		storage_md5=`ssh -x admin@$storage_node_ip "md5sum /data01/avamar/src/stunnel-4.36-0.10.2.x86_64.rpm" | tee -a $logfile`
+		_var=`echo $stunnel_md5 | awk {'print $1'}`
+		if [[ $_var != $stunnel_md5 ]] ; then
+			log "ERROR: md5sum mismatch, please recopy stunnel-4.36-0.10.2.x86_64.rpm and confirm to continue"
+			check
+		else
+			log "$(tput setaf 3)Md5sum Matched $(tput sgr0)"
+		fi
+		sleep 5
+		log "Patching Stunnel on storage node"
+		ssh -x root@$storage_node_ip "rpm -Uvh /data01/avamar/src/stunnel-4.36-0.10.2.x86_64.rpm" | tee -a $logfile
+		if [[ $? == 0 ]] ; then
+			log "Stunnel patched successfully on storage node $storage_node_ip"
+		else
+			log "Unable to patch stunnel on storage node $storage_node_ip"
+		#	exit 21
+		fi
+		sleep 5
+		log "Verifying that stunnel is patched successfully"
+		e=`ssh -x root@$storage_node_ip "rpm -qa | grep stunnel" | tee -a $logfile`
+		if [[ $e == "stunnel-4.36-0.10.2" ]] ; then
+			log "Stunnel stunnel-4.36-0.10.2 patched on storage node $storage_node_ip"
+			echo -ne "$(tput setaf 2)\nSuccess\n$(tput sgr0)"
+		else
+			log "ERROR: Incorrect stunnel version, expected stunnel-4.36-0.10.2"
+			log "ERROR: Stunnel NOT patched on storage node $storage_node_ip"
+			log "Please run this step manually"
+			exit 15
+		fi
+                unlock 13
+                check
+                if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                        task14
+                fi
+}
+
+#TASK 14 ( task 21)
+#Swap file configuration
+
+# TODO create one swap file with 16GB - current 
+
+
+task14() {
+                lock 14
+                echo "##################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #14 Swap file configurations $(tput sgr0)"
+                echo "##################################"
+                log "(Starting Task 14)"
+		log "Checking amount of swap space on storage node $storage_node_ip"
+		loading 5
+
+		e=`ssh -x admin@$storage_node_ip "swapon -s" | tail -1 | awk {'print $3'}`
+		if [[ "$e" -lt "16000000" ]] ; then
+                	log "Swap space on storage node $storage_node_ip : $(expr $e / 1000000) GB"
+                	echo -ne "$(tput setab 0)$(tput setaf 5)Note:$(tput sgr0)\nRecommended configured swap space on new storage node is 16GB, currently $storage_node_ip has only $(expr $e / 1000000) GB \n"
+                	log "Proceeding with creating swap"
+                	log "Obtaining list of available data partitions on new node"
+                	e=`ssh -x root@$storage_node_ip "df -h | grep data0"` | tee -a $logfile
+                	log "Please confirm to proceed with increasing swap space to recommended value"
+			check
+			swapdiff=$(expr 16000000 - $e)
+			log "Creating remaining $(expr $swapdiff / 1000000) GB of swap"
+			ssh -x root@$storage_node_ip "cd /data01 && dd if=/dev/zero of=ddr_metadata_swapfile bs=1G count=$swapdiff" | tee -a $logfile
+			ssh -x root@$storage_node_ip "mkswap /data01/ddr_metadata_swapfile"
+			if [[ $? == 0 ]] ; then
+				log "swap file of $swapdiff GB created successfully"
+
+			else
+				log "Unable to create $swapdiff GB on new node, please create it manually and confirm to continue"
+				check
+			fi
+
+			log "Enabling new swap file"
+			ssh -x root@$storage_node_ip "swapon /data01/ddr_metadata/swapfile" | tee -a $logfile
+			if [[ $? == 0 ]] ; then
+				log "Swap enabled successfully"
+				log "Please verify that swapfile has been added to kernel's swap space"
+				ssh -x root@$storage_node_ip "swapon -s"
+				log "Adding new swap entry to /etc/fstab"
+				ssh -x root@$storage_node_ip "cp /etc/fstab /etc/fstab.bkp && echo 'data01/ddr_metadata_swapfile swap swap defaults 0 0' >> /etc/fstab"
+			else
+				log "Unable to enable swap on new node, please enable it manually and confirm to continue"
+				check
+			fi
+
+		else
+			log "Check passed, storage node $storage_node_ip has $(expr $e / 1000000) GB. of swap space configured."
+			log "Skipping swap creation"
+                        unlock 14
+                        check
+                        task15
+		fi
+
+               unlock 14
+               check
+               if [[ $success == "TRUE" ]] && [[ $proceed == "TRUE" ]]  ; then
+                       task15
+               fi
+}
+
+#TASK 15 
+#Update OS Parameters
+#TODO check if fs.file-max exists in /etc/sysctl.conf first, if it exists modify, otherwise append 2 lines
+
+
+task15() {
+                lock 15
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #15 Update OS parameters $(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 15)"
+		log "Updating OS parameters"
+		log "Modifying the max file handles kernel setting on storage node $storage_node_ip"
+		e=`ssh root@$storage_node_ip -x "sysctl -w fs.file-max=1600000"`
+		if [[ $? == 0 ]] ;then
+			log "max file handle successfully modified"
+		else
+			log "ERROR: unable to modify max file handle"
+			log "Please modify it manually and confirm to continue"
+			check
+		fi
+		log "Backing up limits.conf and sysctl.conf"
+		ssh -x root@$storage_node_ip "cp /etc/security/limits.conf /etc/security/limits.conf.bkp && cp /etc/sysctl.conf /etc/sysctl.conf.bkp" 
+		if [[ $? == 0 ]] ; then
+			log "limits.conf and sysctl.conf backed up successfully"
+		fi		
+		
+		log "Modifying nofile parameter to 1000000 in /etc/security/limits.conf"
+		ssh -x root@$storage_node_ip "sed -i 's/^*       -       nofile .*$/*       -       nofile  1000000/' /etc/security/limits.conf"
+		if [[ $? == 0 ]] ; then
+			log "nofile parameter modified successfully"
+		fi			
+
+		log "Increasing maximum open file handles to 1600000 in /etc/sysctl.conf"
+		ssh -x root@$storage_node_ip "echo '# Increase maximum simultaneously open file handles.' >> /etc/sysctl.conf && echo '*       -       fs.file-max = 1600000' >> /etc/sysctl.conf"
+		if [[ $? == 0 ]] ; then
+			log "fs.file-max parameter modified successfully"
+		fi			
+
+                unlock 15
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task16
+                fi
+}
+
+
+#TASK 16 (task 23)
+#OS Security Patch Rollup Installation 
+
+task16() {
+                lock 16
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #16 OS Security Patch Rollup$(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 16)"
+		log "Creating ospatches directory on storage node"
+		ssh -x root@$storage_node_ip "mkdir $avhome/src/ospatches"
+		if [[ $? == 0 ]] ; then
+			log "$avhome/src/ospatches directory created successfully"
+		else
+			log "Unable to create directory $avhome/src/ospatches, please confirm it exists to continue" | tee -a $logfile
+			check
+		fi
+		log "copying sec_os_updates_SLES-2016-Q3-v3.tgz & sec_install_os_errata_sles.pl to new storage node"
+		scp sec_os_updates_SLES-2016-Q3-v3.tgz sec_install_os_errata_sles.pl root@$storage_node_ip:/$avhome/src/ospatches
+		if [[ $? == 0 ]] ; then
+			log "Files copied successfully"
+		else
+			log "Unable to copy files, please copy them manually and confirm to continue"
+			check
+		fi
+		log "Installing the security rollup"
+
+		ssh -x root@$storage_node_ip "perl $avhome/src/ospatches/sec_install_os_errata_sles.pl $avhome/src/ospatches/sec_os_updates_SLES-2016-Q3-v3.tgz"
+
+                unlock 16
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+			log "NOTE: Storage node reboot required, please confirm to proceed" 
+			check
+			log "Please enter storage node root password"
+			ssh -x root@$storage_node_ip "reboot"
+			log "Rebooting Storage node $storage_node_ip ..."
+			log "Please confirm that the new node is up and running before proceeding"
+			check
+			task17
+                fi
+}
+
+#TASK 17
+#Install the new nodes
+
+task17() {
+                lock 17
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #17 Install new nodes$(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 17)"
+		log "Please verify that checkpoint validation (HFS check) has completed"
+		mccli checkpoint show --verbose=TRUE
+		check
+		current_date=`date +%y%m%d`
+		log "Making a copy of the current probe.xml"
+		cp $avhome/var/probe.xml $avhome/var/probe.xml.$current_date
+		log "Checking current nodes configured:"
+		sleep 2
+		nodedb print
+		sleep 5
+		log "Checking existing nodenumbers:"
+		nodedb print --nodes=0.all+ --addr --id
+		sleep 5
+		read -p "Please enter node number (0.X) ( NOTE: put X value only i.e: 3 ): " nodenumber
+		log "Adding the new node to probe.xml"
+		nodedb add node --node=0.$nodenumber --addr=$storage_node_ip --type=storage --nwgrp=1 --allow=backup
+		if [[ $? == 0 ]] ; then
+			log "New Storage node has been successfully added to probe.xml"
+		fi
+		sleep 5
+		log "Adding the Internal IP address for the new node to probe.xml"
+		nodedb add if --node=0.$nodenumber --addr=$bond1 --nwgrp=2 --allow=internal
+                if [[ $? == 0 ]] ; then
+                        log "Internal IP address  has been successfully added to probe.xml"
+                fi
+		sleep 5
+		log "Validating the new node has been correctly added to probe.xml"
+		nodedb print --nodes=0.all+ --addr --id
+
+                unlock 17
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task18
+                fi
+}
+
+#TASK 18
+#Copy existing .ssh directories to new node
+
+task18() {
+                lock 18
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #18 Copy existing .ssh directories$(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 18)"
+		log "Copying existing .ssh directory to new storage node"
+		log "Please Enter root password for utility node followed by root password for storage node"
+		su -c "tar Cczf / - root/.ssh home/admin/.ssh home/dpn/.ssh | ssh root@$storage_node_ip tar Cxzf / -"
+		if [[ $? == 0 ]] ; then
+			log "SSH directories copied successfully to new storage node"
+		else
+			log "Unable to copy SSH directories, please execute the below command from utility node"
+			log "tar Cczf / - root/.ssh home/admin/.ssh home/dpn/.ssh | ssh root@$storage_node_ip tar Cxzf / -"
+		fi
+               
+
+		log "$(tput setaf 3) NOTE: Please make sure to change root, admin, and dpn passwords on new node using passwd command$(tput sgr0)"
+		
+		log "Please confirm that password for root, admin, and dpn has been changed before proceeding"
+		check
+		unlock 18
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task19
+                fi
+}
+
+#TASK 19
+# Verify passwords and SSH keys on the new nodes
+
+task19() {
+                lock 19
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #19 Verify Passwords and SSH keys on new node$(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 19)"
+		eval `$bin/ssh-agent` &> $logfile
+		$bin/ssh-add ~admin/.ssh/dpnid | tee -a $logfile
+		log "running mapall to verify passwords and keys:"
+		mapall --all date
+                unlock 19
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task20
+                fi
+}
+
+
+
+#TASK 20
+# Time Configuration
+
+task20() {
+                lock 20
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #20 Time Configuration$(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 20)"
+		cat > /tmp/dpncmds <<-EOF
+		#!/bin/bash
+		eval \`ssh-agent\`
+		ssh-add ~dpn/.ssh/dpnid
+		mapall --all --user=root 'date'
+		asktime
+		EOF
+		chmod a+rwx /tmp/dpncmds
+		su - dpn -c "/tmp/dpncmds"
+                unlock 20
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task21
+                fi
+}
+
+
+
+
+#TASK 21
+# Update hosts file
+
+task21() {
+                lock 21
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #21 Update hosts file$(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 21)"
+		log "$(tput setaf 1)$(tput bold)Please modify /etc/hosts file on Utility node to add both the internal and customer network of the new nodes $(tput sgr0)"
+		log "Please confirm to continue and proceed with copying /etc/hosts file to all nodes"
+		check
+		eval `$bin/ssh-agent` &> $logfile
+		$bin/ssh-add ~admin/.ssh/dpnid
+		mapall --all+ --user=root copy /etc/hosts
+		if [[ $? == 0 ]] ; then
+			log "/etc/hosts has been successfully copied to all storage nodes in admin home dir"
+		else
+			log "ERROR: unable to copy /etc/hosts to all storage nodes"
+		fi
+		log "Copying the hosts file to /etc on each node"
+		mapall --all+ --user=root 'cp -f etc/hosts /etc'
+		if [[ $? == 0 ]] ; then
+			log "hosts file has been successfully copied to /etc on all nodes"
+		fi
+                unlock 21
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task22
+                fi
+}
+
+
+#TASK 22
+# Install Avamar Security Packages
+
+task22() {
+                lock 22
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #22 Install Avamar Security Packages$(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 22)"
+		log "Checking if Avamar password security package is installed"
+		rpm  -qa | grep pass 2>&1 /dev/null
+		if [[ $? == 0 ]] ; then
+			log "Avamar password security package is installed"
+		else
+			log "Avamar password security package is not installed"
+		fi
+		log "Checking version of the avamar firewall and hardening packages that are installed"
+		rpm  -qa | egrep "avf|harden"
+		log "Copying Avamar firewall package to new node"
+		scp $home/hardening/avfwb*.rpm $storage_node_ip:$avhome/src
+		log "Copying Avamar hardening package to new node"
+		scp $home/hardening/avharden*.rpm $storage_node_ip:$avhome/src
+		log "Copying Avamar password package to new node"
+		scp $home/hardening/avpasswd*.rpm $storage_node_ip:$avhome/src
+		log "Installing Avamar security packages on the new node"
+		ssh -x root@$storage_node_ip "cd $avhome/src && rpm -ivh avfwb*.rpm avharden*.rpm avpasswd*.rpm"
+
+		if [[ $? == 0 ]] ; then
+			log "Avamar security packages installed successfully on the new node"
+		fi
+
+		log "Updating /etc/firewall-ips on utility node"
+		su root -c "cp /etc/firewall-ips /etc/firewall-ips.bkp"
+
+		if [[ $? == 0 ]] ; then
+			log "/etc/firewall-ips backed-up successfully"
+		fi
+		su root -c "sed -i '2s/.$/ $storage_node_ip\"/' /etc/firewall-ips"
+
+		if [[ $? == 0 ]] ; then
+			log "External IP added successfully in /etc/firewall-ips"
+		fi
+
+		su root -c "sed -i '3s/.$/ $bond1\"/' /etc/firewall-ips"
+
+		if [[ $? == 0 ]] ; then
+			log "Internal IP added successfully in /etc/firewall-ips"
+		fi		
+		
+		log "Changing permissions of sec_create_nodeips.sh script"
+		su root -c "chmod a+x $avhome/lib/admin/security/sec_create_nodeips.sh"
+
+		if [[ $? == 0 ]] ; then
+			log "Permissions of sec_create_nodeips.sh changed successfully"
+		fi
+		
+		log "Updating the firewall-ips file on other nodes in the grid"
+		sudo $avhome/lib/admin/security/sec_create_nodeips.sh
+
+		if [[ $? == 0 ]] ; then
+			log "firewall-ips file updated successfully on other storage nodes"
+		else
+			log "Unable to update firewall-ips file on other storage nodes, please update them manually and confirm to continue"
+			check
+		fi
+
+		log "Restarting firewall service on all nodes"
+		eval `$bin/ssh-agent` &> $logfile
+		$bin/ssh-add ~admin/.ssh/dpnid | tee -a $logfile
+		mapall --all+ --noerror --user=root service avfirewall restart
+
+		if [[ $? == 0 ]] ; then
+			log "Firewall service restarted successfully on all nodes"
+		else
+			log "Unable to restart firewall service on all nodes, please restart it manually and confirm to continue"
+			check
+		fi
+
+                unlock 22
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task23
+                fi
+}
+
+
+
+#TASK 23
+# Update the sudoers file on new nodes
+
+
+task23() {
+                lock 23
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #23 Update the sudoers file on new nodes $(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 23)"
+
+		read -p "Enter External IP address of an old storage node to copy sudoers file from: " nodeip
+		scp root@$nodeip:/etc/sudoers .
+		scp ./sudoers root@$storage_node_ip:/etc
+		if [[ $? == 0 ]] ; then
+			log "Sudoers file copied successfully from $oldnode to new node"
+		else
+			log "Unable to copy sudoers file, please copy it manually and confirm to continue"
+			check
+		fi
+
+                unlock 23
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task24
+                fi
+}
+
+
+#TASK 24
+# Update Security Certificates on the new node
+
+
+task24() {
+                lock 24
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #24 Update Security Certificates on the new node $(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 24)"
+		log "copying the security certificates to the new nodes"
+		read -p "Please enter node number of the new node(0.X) ( NOTE: put X value only i.e: 3 )  : " nodenumber
+                eval `$bin/ssh-agent` &> $logfile
+                $bin/ssh-add ~admin/.ssh/dpnid | tee -a $logfile
+		cd /usr/local/avamar/etc && mapall --nodes=0.$nodenumber copy {key,cert}.pem
+		if [[ $? == 0 ]] ; then
+			log "Security certificates copied successfully to new node"
+		else
+			log "Unable to copy security certificates to new node"
+			log "Please copy security certificates manually and confirm to continue"
+			check
+		fi
+
+		log "Updating permissions of the security certificates on the new node"
+		mapall --nodes=0.$nodenumber chmod 400 {key,cert}.pem
+                if [[ $? == 0 ]] ; then
+                        log "permissions updated successfully"
+                else
+                        log "Unable to update security certificates permissions on the new node"
+			log "Please update security certificates manually and confirm to continue"
+			check
+                fi
+
+                unlock 24
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task25
+                fi
+}
+
+
+#TASK 25
+# Start the new node
+
+task25() {
+                lock 25
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #25 Start the new node $(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 25)"
+		eval `$bin/ssh-agent` &> $logfile
+		$bin/ssh-add ~admin/.ssh/dpnid | tee -a $logfile
+		log "Verify that load average on storage nodes is less than 0.2"
+		mapall --all+ --user=root 'uptime'
+		log "Verify that balancing is still disabled"
+		avmaint config --ava | grep balancemin
+		echo -ne " Would you like to set balancemin to 0 ? "
+                _answered=0
+                while [[ $_answered != 1 ]] ; do
+                        read -r -e -p $'\npress n to continue and y to set balancemin to 0 [y/n]:  ' answer
+                        case $answer in
+                                [yY][eE][sS]|[yY])
+                                log "Setting balancemin to 0"
+                                avmaint config --ava balancemin=0
+                                log "Validating that balancemin equals 0"
+                                avmaint config --ava | grep balancemin
+                                _answered=1
+                                ;;
+                                [nN][oO]|[nN])
+                                log "Continuing..."
+                                _answered=1
+                                continue
+                                ;;
+                                *)
+                                _answered=0
+                                ;;
+                        esac
+		done
+		log "Disabling backup activity to prepare for the dedicated balance"
+		avmaint suspend
+		log "Disabling backup scheduler"
+		dpnctl stop sched
+		log "Disabling maintenance schedule"
+		dpnctl stop maint
+		sleep 10
+		log "Please verify that backup scheduler, maintenance scheduler, and gsan are in the correct states and confirm to continue"
+		log "Example: gsan (degraded), Backup Scheduler (down), Maintenance Scheduler (suspended)"
+		dpnctl status
+		check
+		log "Verify that no gsan processes are running on the new node and confirm to continue"
+		read -p "Please enter node number (0.X) ( NOTE: put X value only i.e: 3 ): " nodenumber
+		ssn 0.$nodenumber 'ps -ef | grep gsan'
+		check
+		log "Starting new node"
+		sleep 5
+		start.nodes --nodes=0.$nodenumber --clean 
+		sleep 5
+		log "Updating networking connection info on the new node"
+		avmaint networkconfig --ava /usr/local/avamar/var/probe.xml
+		log "Enabling balancing so that a minimum of 2 stripes are copied to the new node"
+		avmaint config --ava balancemin=2
+		log "Waiting for 5 minutes then checking that the new node has at least 2 stripes"
+		log "Please wait ..."
+		sleep 300
+		status.dpn
+		log "Please verify that 2 or more stripes are 'onl' for the new node and confirm to continue"
+		check
+		log "Disabling balancing"
+		avmaint config --ava balancemin=0
+		log "Creating a new checkpoint"
+		avmaint checkpoint --ava
+		log "Please verify that the correct addition and physical locations of the new node"
+		nodenumbers
+                unlock 25
+                check
+                if [[ $success -eq "TRUE" ]] && [[ $proceed -eq "TRUE" ]]  ; then
+                        task26
+                fi
+}
+
+#TASK 26
+# Put Avamar Server back to production ready state
+
+task26() {
+                lock 26
+                echo "################################"
+                echo "$(tput setab 7)$(tput setaf 0)TASK #26 Put Avamar Server back to production state $(tput sgr0)"
+                echo "################################"
+                log "(Starting Task 26)"
+		log "Starting backup scheduler"
+		dpnctl start sched
+		if [[ $? == 0 ]] ; then
+			log "Backup Scheduler started successfully"
+		else
+			log "Unable to start backup scheduler, please start it manually and confirm to continue"
+			check
+		fi
+		loading 1 
+		log "Starting maintenance scheduler"
+                dpnctl start maint
+                if [[ $? == 0 ]] ; then
+                        log "Maintenance Scheduler started successfully"
+                else
+                        log "Unable to start maintenance scheduler, please start it manually and confirm to continue"
+                        check
+                fi
+		loading 1
+		log "Resuming normal gsan activity"
+		avmaint resume
+                if [[ $? == 0 ]] ; then
+                        log "gsan activity resumed successfully"
+                else
+                        log "Unable to resume gsan activity, please resume it manually and confirm to continue"
+                        check
+                fi
+		loading 1
+		log "Ensuring that server is healthy and ready for production use"
+		dpnctl status
+		loading 1
+		log "Restarting asynchronous crunching"
+		avmaint config --ava asynccrunching=true
+		loading 1
+		log "Verifying that asynchronous crunching has restarted"
+		avmaint config --ava | grep crunch
+		loading 1
+		log "Changing the cpmostrecent parameter back to default"
+		avmaint config --ava cpmostrecent=2
+		loading 1
+		log "Changing cphfschecked parameter back to default"
+		avmaint config --ava cphfschecked=1
+		loading 1
+		log "Verifying the changes to cpmostrecent and cphfschecked parameters"
+		avmaint config --ava | grep cp
+		loading 1
+		log "Verifying that all services are running as expected"
+		dpnctl status
+		loading 1
+		log "Verifying that the server is fully operational as expected"
+		status.dpn
+		loading 1 
+                if [[ $success -eq "TRUE" ]] ; then
+			log "Procedure completed successfully"
+	                echo -ne "$(tput setaf 2)\nProcedure completed Successfully !!!\n$(tput sgr0)"
+
+			exit 0
+                fi
+}
+
+log "************"
+log "Starting ACU"
+log "************"
+clear
+echo "$(tput setaf 6)##############################################"
+echo "#                                            #"
+echo "#      DELL EMC Avamar Capacity Upgrade      #"
+echo "#  Avamar Software 7.1.x Add Storage Node    #"
+echo "#                                            #"
+echo "##############################################"
+
+echo -ne "\n"
+echo -ne "\nPre-upgrade configuration:\n\n$(tput sgr0)"
+echo -e "IPMI IP            :    $(tput setaf 6)$ipmi_ip\n$(tput sgr0)"
+echo -e "Utility Node IP    :    $(tput setaf 6)$utility_node_ip\n$(tput sgr0)"
+echo -e "New Storage Node IP:    $(tput setaf 6)$storage_node_ip\n$(tput sgr0)"
+echo -e "NTP Server IP      :    $(tput setaf 6)$ntp_ip\n$(tput sgr0)"
+echo -e "Storage node bond0 :    $(tput setaf 6)$bond0\n$(tput sgr0)"
+echo -e "Storage node bond1 :    $(tput setaf 6)$bond1\n$(tput sgr0)"
+
+#echo -ne "$(tput setaf 6)\n\nPredefined download URLs :$(tput sgr0)\n\n"
+#echo -ne "DataStore/GEN4S url	  : $(tput setaf 6)$g4surl$(tput sgr0)\n\n"
+#echo -ne "Proactive check script url: $(tput setaf 6)$purl$(tput sgr0)\n\n"
+#echo -ne "rebuild_collect script url: $(tput setaf 6)$rcurl$(tput sgr0)\n\n"
+#echo -ne "Avamar dpnavsys Package url: $(tput setaf 6)$dpnavurl$(tput sgr0)\n\n"
+
+echo -ne "\n\n\nPlease review the above information and confirm to continue.\n"
+check
+conncheck
+
+
+_lock=`ls -a $lock | grep [0-9][0-9].lock`
+if [[ $? != 0 ]] ; then
+	_lock=`ls -a $lock | grep [0-9].lock`
+        taskno=`echo $_lock | grep -o [0-9]`
+else
+        taskno=`echo $_lock | grep -o [0-9][0-9]`
+fi
+if [[ $_lock ]] ; then
+	log "##########################################################################\n"
+	log "Detected previous incomplete upgrade attempt that was stopped in TASK : $taskno\n"
+	log "##########################################################################\n"
+	read -r -e -p $"Would you like to continue previous attempt and start from task $taskno (n to startover) ?[y/n] " answer
+	case $answer in
+        	[yY][eE][sS]|[yY])
+		echo -ne "$(tput setaf 0)$(tput setab 1)Restarting task #$taskno$(tput sgr0)\n"
+		log "Continuing..."
+                rm -rf lock ; mkdir lock
+		loading 5
+		task$taskno
+        	;;
+        	[nN][oO]|[nN])
+		echo -e "$(tput setaf 7)$(tput setab 1)Starting over...$(tput sgr0)"
+		rm -rf lock ; mkdir lock
+		loading 5
+		log "(Starting over)"
+		task1
+        	;;
+        	*)
+        	exit 6
+        	;;
+	esac
+
+else
+	task1
+fi

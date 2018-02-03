@@ -1,10 +1,6 @@
 #!/bin/bash
 #############################################################
-#                                                           #
-#  DELL|EMC Avamar Software 7.1.x Add Storage Node Script   #
-#                                                           #
-# Description   : Avamar Capacity Upgrade Tool              #
-# Author        : Ahmed Fekry, ahmed.fekry@dell.com         #
+# Author        : Ahmed Fekry, ahmed.fekry0@gmail.com       #
 # License       : GPL <http://www.gnu.org/licenses/gpl.html #
 #                                                           #
 #############################################################

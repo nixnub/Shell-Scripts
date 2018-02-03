@@ -1444,14 +1444,15 @@ log "************"
 clear
 echo "$(tput setaf 6)##############################################"
 echo "#                                            #"
-echo "#      DELL EMC Avamar Capacity Upgrade      #"
-echo "#  Avamar Software 7.1.x Add Storage Node    #"
+echo "#         Capacity Upgrade	           #"
+echo "#   	Add Storage Node		   #"
 echo "#                                            #"
 echo "##############################################"
 
 echo -ne "\n"
 echo -ne "\nPre-upgrade configuration:\n\n$(tput sgr0)"
 echo -e "IPMI IP            :    $(tput setaf 6)$ipmi_ip\n$(tput sgr0)"
+
 echo -e "Utility Node IP    :    $(tput setaf 6)$utility_node_ip\n$(tput sgr0)"
 echo -e "New Storage Node IP:    $(tput setaf 6)$storage_node_ip\n$(tput sgr0)"
 echo -e "NTP Server IP      :    $(tput setaf 6)$ntp_ip\n$(tput sgr0)"
